@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ドラゴニカ対戦ログ集計ツール
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  対戦ログの各キャラクター行動を集計します
 // @author       ゴニョマル
 // @match        https://metropolis-c.sakura.ne.jp/teikigame/dragon1st/battlelogs/*.html
@@ -280,6 +280,12 @@
             const lineText = lines[i].textContent.trim();
             if (!lineText) continue;
 
+            const spRecovery = parseSPRecoveryLine(lineText);
+            if (spRecovery) {
+                aggregateSPHealing(stats, actorName, spRecovery.target, spRecovery.recovery, turnNum);
+                continue;
+            }
+
             const damageMatch = lineText.match(/の「(.+?)」が\s*(.+?)\s*に\s*([0-9,]+)\s*ダメージを与えた/);
             if (damageMatch) {
                 const target = damageMatch[2].trim();
@@ -288,26 +294,15 @@
                 continue;
             }
 
+            if (lineText.includes('SP') && lineText.includes('回復した')) {
+                continue;
+            }
+
             const healMatch = lineText.match(/の「(.+?)」が\s*(.+?)\s*を\s*([0-9,]+)\s*回復した/);
             if (healMatch) {
                 const target = healMatch[2].trim();
                 const recovery = parseInt(healMatch[3].replace(/,/g, ''), 10);
                 aggregateHPHealing(stats, actorName, target, recovery, turnNum);
-                continue;
-            }
-
-            const spMatch = lineText.match(/^(.+?) の .*?SP(?:が|を)\s*([0-9,]+)\s*回復した/);
-            if (spMatch) {
-                const target = spMatch[1].trim();
-                const recovery = parseInt(spMatch[2].replace(/,/g, ''), 10);
-                aggregateSPHealing(stats, actorName, target, recovery, turnNum);
-                continue;
-            }
-
-            const spFallbackMatch = lineText.match(/SP(?:が|を)\s*([0-9,]+)\s*回復した/);
-            if (spFallbackMatch) {
-                const recovery = parseInt(spFallbackMatch[1].replace(/,/g, ''), 10);
-                aggregateSPHealing(stats, actorName, actorName, recovery, turnNum);
                 continue;
             }
 
@@ -404,6 +399,32 @@
         return entries;
     }
 
+    function parseSPRecoveryLine(lineText) {
+        if (!lineText || !lineText.includes('回復')) {
+            return null;
+        }
+
+        const patterns = [
+            /^(?:.+? の )?(?:「[^」]+」が\s*)?(.+?)\s+の\s*SP(?:が|を)\s*([0-9,]+)\s*回復した/, 
+            /^(?:.+? の )?(?:「[^」]+」が\s*)?(.+?)\s*のSP(?:が|を)\s*([0-9,]+)\s*回復した/, 
+            /^(?:.+? の )?(?:「[^」]+」が\s*)?(.+?)\s+SP(?:が|を)\s*([0-9,]+)\s*回復した/, 
+            /^(?:.+? の )?(?:「[^」]+」が\s*)?(.+?)\s*の\s*SP(?:が|を)\s*([0-9,]+)\s*回復した/, 
+            /^(?:.+? の )?(?:「[^」]+」が\s*)?(.+?)\s*の\s*SP回復(?:が|を)?\s*([0-9,]+)\s*回復した/
+        ];
+
+        for (const pattern of patterns) {
+            const match = lineText.match(pattern);
+            if (match) {
+                return {
+                    target: match[1].trim(),
+                    recovery: parseInt(match[2].replace(/,/g, ''), 10)
+                };
+            }
+        }
+
+        return null;
+    }
+
     function parseFinalTurnStatusConditions(stats) {
         const battleTurns = document.querySelectorAll('div.battle-turn');
         if (battleTurns.length === 0) {
@@ -493,6 +514,12 @@
 
             if (!currentChar) continue;
 
+            const spRecovery = parseSPRecoveryLine(line);
+            if (spRecovery) {
+                aggregateSPHealing(stats, currentChar, spRecovery.target, spRecovery.recovery, turnNum);
+                continue;
+            }
+
             // ダメージ検出
             const damageMatch = line.match(/「(.+?)」が\s*(.+?)\s*に\s*(\d+)\s*ダメージを与えた/);
             if (damageMatch) {
@@ -507,20 +534,6 @@
                 const target = hpMatch[2].trim();
                 const recovery = parseInt(hpMatch[3]);
                 aggregateHPHealing(stats, currentChar, target, recovery, turnNum);
-            }
-
-            // SP回復
-            const spMatch = line.match(/^(.+?) の .*?SP(?:が|を)\s*(\d+)\s*回復した/);
-            if (spMatch) {
-                const target = spMatch[1].trim();
-                const recovery = parseInt(spMatch[2]);
-                aggregateSPHealing(stats, currentChar, target, recovery, turnNum);
-            } else {
-                const spFallbackMatch = line.match(/SP(?:が|を)\s*(\d+)\s*回復した/);
-                if (spFallbackMatch) {
-                    const recovery = parseInt(spFallbackMatch[1]);
-                    aggregateSPHealing(stats, currentChar, currentChar, recovery, turnNum);
-                }
             }
 
             // 最大HP増加
