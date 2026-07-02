@@ -799,8 +799,8 @@
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
                     <div><strong>最終ステータス変化:</strong><br>${formatStatusSummary(stat.summary.statusChangesReceived)}</div>
                     <div><strong>最終状態異常:</strong><br>${formatConditionMap(Object.keys(stat.summary.statusConditionsFinal).length > 0 ? stat.summary.statusConditionsFinal : stat.summary.statusConditionsReceived)}</div>
-                    <div><strong>自己ステータス:</strong><br>${formatStatusMap(stat.summary.statusChangesReceivedSelf)}</div>
-                    <div><strong>他者ステータス:</strong><br>${formatStatusMap(stat.summary.statusChangesReceivedOther)}</div>
+                    <div><strong>自分バフデバフ影響:</strong><br>${formatStatusMap(stat.summary.statusChangesReceivedSelf)}</div>
+                    <div><strong>他者バフデバフ影響:</strong><br>${formatStatusMap(stat.summary.statusChangesReceivedOther)}</div>
                 </div>
             </div>
         `;
