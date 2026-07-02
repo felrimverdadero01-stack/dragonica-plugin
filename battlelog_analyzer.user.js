@@ -314,7 +314,7 @@
                 continue;
             }
 
-            const statusMatch = lineText.match(/^(.+?)\s*(?:の|に)\s.*?(ステータスが上昇|ステータスが低下|状態異常が付与された).*$/);
+            const statusMatch = lineText.match(/^(.+?)\s*(?:の|に)\s.*?(ステータスが上昇|ステータスが低下|ステータスが変化|状態異常が付与された).*$/);
             if (statusMatch) {
                 const target = statusMatch[1].trim();
                 const summaryLine = lines[i + 1] ? lines[i + 1].textContent.trim() : '';
@@ -405,11 +405,8 @@
         }
 
         const patterns = [
-            /^(?:.+? の )?(?:「[^」]+」が\s*)?(.+?)\s+の\s*SP(?:が|を)\s*([0-9,]+)\s*回復した/, 
-            /^(?:.+? の )?(?:「[^」]+」が\s*)?(.+?)\s*のSP(?:が|を)\s*([0-9,]+)\s*回復した/, 
-            /^(?:.+? の )?(?:「[^」]+」が\s*)?(.+?)\s+SP(?:が|を)\s*([0-9,]+)\s*回復した/, 
-            /^(?:.+? の )?(?:「[^」]+」が\s*)?(.+?)\s*の\s*SP(?:が|を)\s*([0-9,]+)\s*回復した/, 
-            /^(?:.+? の )?(?:「[^」]+」が\s*)?(.+?)\s*の\s*SP回復(?:が|を)?\s*([0-9,]+)\s*回復した/
+            /^.*?([^\s]+)\s*の\s*SP(?:が|を)\s*([0-9,]+)\s*回復した/, 
+            /^.*?([^\s]+)\s*の\s*SP回復(?:が|を)?\s*([0-9,]+)\s*回復した/
         ];
 
         for (const pattern of patterns) {
@@ -868,7 +865,7 @@
         if (!map || Object.keys(map).length === 0) {
             return '-';
         }
-        return Object.entries(map).map(([key, value]) => `${key}: ${signed ? formatSigned(value) : value}`).join('<br>');
+        return Object.entries(map).map(([key, value]) => `${key}:${signed ? formatSigned(value) : value}`).join('<br>');
     }
 
     function formatSigned(value) {
@@ -920,11 +917,11 @@
         }
         const entries = trackedStatusFields
             .filter(key => map[key] !== undefined && map[key] !== 0)
-            .map(key => `${key}: ${formatSigned(map[key])}`);
+            .map(key => `${key}:${formatSigned(map[key])}`);
         if (entries.length > 0) {
             return entries.join('<br>');
         }
-        return Object.entries(map).map(([key, value]) => `${key}: ${formatSigned(value)}`).join('<br>');
+        return Object.entries(map).map(([key, value]) => `${key}:${formatSigned(value)}`).join('<br>');
     }
 
     function formatStatusChangesCell(turnData) {
