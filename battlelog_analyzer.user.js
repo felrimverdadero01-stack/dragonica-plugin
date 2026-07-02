@@ -5,6 +5,8 @@
 // @description  対戦ログの各キャラクター行動を集計します
 // @author       ゴニョマル
 // @match        https://metropolis-c.sakura.ne.jp/teikigame/dragon1st/battlelogs/*.html
+// @updateURL    https://github.com/felrimverdadero01-stack/dragonica-plugin/raw/main/battlelog_analyzer.user.js
+// @downloadURL  https://github.com/felrimverdadero01-stack/dragonica-plugin/raw/main/battlelog_analyzer.user.js
 // @grant        none
 // ==/UserScript==
 
