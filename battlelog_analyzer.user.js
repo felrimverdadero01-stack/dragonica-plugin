@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ドラゴニカ対戦ログ集計ツール
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @description  対戦ログの各キャラクター行動を集計します
 // @author       ゴニョマル
 // @match        https://metropolis-c.sakura.ne.jp/teikigame/dragon1st/battlelogs/*.html
@@ -365,9 +365,15 @@
             return entries;
         }
 
+        // 一時バフ/デバフの % 表記は集計対象外にする
+        const filteredSummaryText = summaryText.replace(/[A-Za-z0-9()]+\s*[+-][0-9,]+%/g, '').trim();
+        if (!filteredSummaryText) {
+            return entries;
+        }
+
         const numericRegex = /([A-Za-z0-9()]+)\s*([+-][0-9,]+)/g;
         let match;
-        while ((match = numericRegex.exec(summaryText)) !== null) {
+        while ((match = numericRegex.exec(filteredSummaryText)) !== null) {
             entries.push({
                 name: match[1].trim(),
                 value: parseInt(match[2].replace(/,/g, ''), 10)
@@ -379,9 +385,9 @@
         }
 
         const tokenRegex = /([^\s]+(?:\([^\)]*\))?)/g;
-        while ((match = tokenRegex.exec(summaryText)) !== null) {
+        while ((match = tokenRegex.exec(filteredSummaryText)) !== null) {
             const token = match[1].trim();
-            if (token) {
+            if (token && !token.includes('%')) {
                 const levelMatch = token.match(/^(.+?)(\d+)(?:\(.*\))?$/u);
                 if (levelMatch) {
                     entries.push({name: levelMatch[1].trim(), value: parseInt(levelMatch[2], 10)});
