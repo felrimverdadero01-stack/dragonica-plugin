@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ドラゴニカ対戦ログ集計ツール
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @description  対戦ログの各キャラクター行動を集計します
 // @author       ゴニョマル
 // @match        https://metropolis-c.sakura.ne.jp/teikigame/dragon1st/battlelogs/*.html
@@ -44,13 +44,8 @@
             }
 
             if (stats && Object.keys(stats).length > 0) {
-                const domTurns = parseDOMTurns();
-                if (domTurns.length > 0) {
-                    aggregateDOMTurnActions(domTurns, stats);
-                } else {
-                    const textTurns = parseTextForActions(document.body.innerText);
-                    aggregateActionsToStats(textTurns, stats);
-                }
+                const textTurns = parseTextForActions(document.body.innerText);
+                aggregateActionsToStats(textTurns, stats);
                 parseFinalTurnStatusConditions(stats);
             }
 
@@ -405,24 +400,110 @@
         return entries;
     }
 
+    function parseDamageLine(lineText) {
+        if (!lineText || !lineText.includes('ダメージを与えた')) {
+            return null;
+        }
+
+        const match = lineText.match(/(.+?)\s*に\s*([0-9,]+)\s*ダメージを与えた/);
+        if (!match) {
+            return null;
+        }
+
+        return {
+            target: match[1].trim(),
+            damage: parseInt(match[2].replace(/,/g, ''), 10)
+        };
+    }
+
+    function parseHPRecoveryLine(lineText) {
+        if (!lineText || !lineText.includes('回復した') || lineText.includes('SP')) {
+            return null;
+        }
+
+        const match = lineText.match(/(?:.+?の「.+?」が\s*)?(.+?)\s*を\s*([0-9,]+)\s*回復した/);
+        if (!match) {
+            return null;
+        }
+
+        return {
+            target: match[1].trim(),
+            recovery: parseInt(match[2].replace(/,/g, ''), 10)
+        };
+    }
+
+    function parseInlineStatusChangeLine(lineText) {
+        if (!lineText || (!lineText.includes('増加した') && !lineText.includes('低下した'))) {
+            return null;
+        }
+
+        const match = lineText.match(/^(.+?)\s+(?:は|の).+?[、,]\s*(.+?)\s+が\s*([0-9,]+)\s*(増加|低下)した/);
+        if (!match) {
+            return null;
+        }
+
+        const target = match[1].trim();
+        const fieldsText = match[2].trim();
+        const magnitude = parseInt(match[3].replace(/,/g, ''), 10);
+        const sign = match[4] === '低下' ? -1 : 1;
+        const fields = fieldsText.split(/\s*と\s*/).map(field => field.trim()).filter(field => trackedStatusFields.includes(field));
+
+        if (fields.length === 0) {
+            return null;
+        }
+
+        return {
+            target,
+            entries: fields.map(field => ({name: field, value: sign * magnitude}))
+        };
+    }
+
     function parseSPRecoveryLine(lineText) {
         if (!lineText || !lineText.includes('回復')) {
             return null;
         }
 
         const patterns = [
-            /^.*?([^\s]+)\s*の\s*SP(?:が|を)\s*([0-9,]+)\s*回復した/, 
-            /^.*?([^\s]+)\s*の\s*SP回復(?:が|を)?\s*([0-9,]+)\s*回復した/
+            /^(.*?)\s*の「.+?」が\s*(.+?)\s*の\s*SPを\s*([0-9,]+)\s*回復した/,
+            /^(.*?)\s*の\s*.+?!\s*(.+?)\s*の\s*SPが\s*([0-9,]+)\s*回復した/,
+            /^(.+?)\s*の\s*SPが\s*([0-9,]+)\s*回復した/,
+            /^(.+?)\s*は\s*.+?により\s*([0-9,]+)\s*SP回復\s*した/
         ];
 
-        for (const pattern of patterns) {
-            const match = lineText.match(pattern);
-            if (match) {
-                return {
-                    target: match[1].trim(),
-                    recovery: parseInt(match[2].replace(/,/g, ''), 10)
-                };
-            }
+        const etherMatch = lineText.match(patterns[0]);
+        if (etherMatch) {
+            return {
+                source: etherMatch[1].trim(),
+                target: etherMatch[2].trim(),
+                recovery: parseInt(etherMatch[3].replace(/,/g, ''), 10)
+            };
+        }
+
+        const utopiaMatch = lineText.match(patterns[1]);
+        if (utopiaMatch) {
+            return {
+                source: utopiaMatch[1].trim(),
+                target: utopiaMatch[2].trim(),
+                recovery: parseInt(utopiaMatch[3].replace(/,/g, ''), 10)
+            };
+        }
+
+        const selfMatch = lineText.match(patterns[2]);
+        if (selfMatch) {
+            return {
+                source: selfMatch[1].trim(),
+                target: selfMatch[1].trim(),
+                recovery: parseInt(selfMatch[2].replace(/,/g, ''), 10)
+            };
+        }
+
+        const conditionMatch = lineText.match(patterns[3]);
+        if (conditionMatch) {
+            return {
+                source: conditionMatch[1].trim(),
+                target: conditionMatch[1].trim(),
+                recovery: parseInt(conditionMatch[2].replace(/,/g, ''), 10)
+            };
         }
 
         return null;
@@ -492,6 +573,26 @@
         return map;
     }
 
+    function extractActorFromLine(line, charNames) {
+        if (!line) {
+            return null;
+        }
+
+        for (const name of charNames) {
+            if (line.startsWith(`${name} の`) || line.startsWith(`${name}:`)) {
+                return name;
+            }
+        }
+
+        const charMatch = line.match(/^(.+?)\s*(?:の|:)\s+/);
+        if (!charMatch) {
+            return null;
+        }
+
+        const candidate = charMatch[1].trim();
+        return charNames.includes(candidate) ? candidate : null;
+    }
+
     function parseActionsFromText(turnContent, stats, turnNum) {
         const lines = turnContent.split('\n');
         let currentChar = null;
@@ -501,42 +602,38 @@
             const line = lines[index].trim();
             if (!line) continue;
 
-            // キャラクター名の検出: 既知のキャラクター名を優先
-            for (const name of charNames) {
-                if (line.startsWith(`${name} の`) || line.startsWith(`${name}:`) || line.startsWith(`${name} `)) {
-                    currentChar = name;
-                    break;
-                }
-            }
-            if (!currentChar) {
-                const charMatch = line.match(/^([\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF\-・_ａ-ｚA-Za-z0-9]+)\s*(?:の|:)/);
-                if (charMatch) {
-                    currentChar = charMatch[1].trim();
-                }
+            // 発動者の切り替えは行動宣言行だけに限定する
+            const actorFromLine = extractActorFromLine(line, charNames);
+            if (actorFromLine) {
+                currentChar = actorFromLine;
             }
 
             if (!currentChar) continue;
 
             const spRecovery = parseSPRecoveryLine(line);
             if (spRecovery) {
-                aggregateSPHealing(stats, currentChar, spRecovery.target, spRecovery.recovery, turnNum);
+                aggregateSPHealing(stats, spRecovery.source || currentChar, spRecovery.target, spRecovery.recovery, turnNum);
+                continue;
+            }
+
+            const inlineStatusChange = parseInlineStatusChangeLine(line);
+            if (inlineStatusChange) {
+                inlineStatusChange.entries.forEach(entry => {
+                    recordReceivedStatusChange(stats, inlineStatusChange.target, entry.name, entry.value, turnNum, inlineStatusChange.target);
+                });
                 continue;
             }
 
             // ダメージ検出
-            const damageMatch = line.match(/「(.+?)」が\s*(.+?)\s*に\s*(\d+)\s*ダメージを与えた/);
-            if (damageMatch) {
-                const target = damageMatch[2].trim();
-                const damage = parseInt(damageMatch[3]);
-                aggregateDamage(stats, currentChar, target, damage, turnNum);
+            const damageInfo = parseDamageLine(line);
+            if (damageInfo) {
+                aggregateDamage(stats, currentChar, damageInfo.target, damageInfo.damage, turnNum);
             }
 
             // HP回復
-            const hpMatch = line.match(/「(.+?)」が\s*(.+?)\s*を\s*(\d+)\s*回復した/);
-            if (hpMatch && !line.includes('SP')) {
-                const target = hpMatch[2].trim();
-                const recovery = parseInt(hpMatch[3]);
-                aggregateHPHealing(stats, currentChar, target, recovery, turnNum);
+            const hpRecovery = parseHPRecoveryLine(line);
+            if (hpRecovery) {
+                aggregateHPHealing(stats, currentChar, hpRecovery.target, hpRecovery.recovery, turnNum);
             }
 
             // 最大HP増加
@@ -551,19 +648,14 @@
             if (line.includes('ステータスが上昇') || line.includes('ステータスが低下') || line.includes('状態異常が付与')) {
                 const statusTargetMatch = line.match(/^(.+?)\s*(?:の|に)\s.*?(ステータスが上昇|ステータスが低下|状態異常が付与された)/);
                 const target = statusTargetMatch ? statusTargetMatch[1].trim() : currentChar;
-                const type = line.includes('上昇') ? 'up' : line.includes('低下') ? 'down' : 'status';
-                for (let i = index + 1; i < Math.min(index + 5, lines.length); i++) {
-                    const statusLine = lines[i];
-                    const statMatch = statusLine.match(/([A-Z]+)\s*([\+\-])(\d+)/);
-                    if (statMatch) {
-                        const statName = statMatch[1];
-                        const sign = statMatch[2] === '+' ? 1 : -1;
-                        const value = parseInt(statMatch[3], 10);
-                        const change = sign * value;
-                        recordReceivedStatusChange(stats, target, statName, change, turnNum, currentChar);
-                    } else if (statusLine.trim() === '') {
-                        break;
-                    }
+                const summaryLine = lines[index + 1] ? lines[index + 1].trim() : '';
+                const changeType = line.includes('上昇') ? 1 : line.includes('低下') ? -1 : 0;
+                const parsedStatus = parseStatusSummary(summaryLine, changeType);
+                parsedStatus.forEach(entry => {
+                    recordReceivedStatusChange(stats, target, entry.name, entry.value, turnNum, currentChar);
+                });
+                if (summaryLine) {
+                    index += 1;
                 }
             }
         }
