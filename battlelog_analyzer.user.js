@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ドラゴニカ対戦ログ集計ツール
 // @namespace    http://tampermonkey.net/
-// @version      1.4
+// @version      1.5
 // @description  対戦ログの各キャラクター行動を集計します
 // @author       ゴニョマル
 // @match        https://metropolis-c.sakura.ne.jp/teikigame/dragon1st/battlelogs/*.html
@@ -432,28 +432,30 @@
         };
     }
 
-    function parseInlineStatusChangeLine(lineText) {
+    function parseInlineStatusChangeLine(lineText, defaultTarget, source) {
         if (!lineText || (!lineText.includes('増加した') && !lineText.includes('低下した'))) {
             return null;
         }
 
-        const match = lineText.match(/^(.+?)\s+(?:は|の).+?[、,]\s*(.+?)\s+が\s*([0-9,]+)\s*(増加|低下)した/);
+        const fieldPattern = trackedStatusFields.join('|');
+        const match = lineText.match(new RegExp(`^(?:(.+?)\\s+(?:は|の).+?\\s+)?((?:${fieldPattern})(?:\\s*と\\s*(?:${fieldPattern}))*)\\s+が\\s*([0-9,]+)\\s*(増加|低下)した`));
         if (!match) {
             return null;
         }
 
-        const target = match[1].trim();
+        const target = (match[1] ? match[1].trim() : defaultTarget) || defaultTarget;
         const fieldsText = match[2].trim();
         const magnitude = parseInt(match[3].replace(/,/g, ''), 10);
         const sign = match[4] === '低下' ? -1 : 1;
         const fields = fieldsText.split(/\s*と\s*/).map(field => field.trim()).filter(field => trackedStatusFields.includes(field));
 
-        if (fields.length === 0) {
+        if (!target || fields.length === 0) {
             return null;
         }
 
         return {
             target,
+            source: source || defaultTarget || target,
             entries: fields.map(field => ({name: field, value: sign * magnitude}))
         };
     }
@@ -578,6 +580,18 @@
             return null;
         }
 
+        if (
+            line.includes('ステータスが上昇') ||
+            line.includes('ステータスが低下') ||
+            line.includes('状態異常が付与') ||
+            line.includes('ダメージを与えた') ||
+            line.includes('回復した') ||
+            line.includes('最大HPが') ||
+            line.includes('を受けた')
+        ) {
+            return null;
+        }
+
         for (const name of charNames) {
             if (line.startsWith(`${name} の`) || line.startsWith(`${name}:`)) {
                 return name;
@@ -591,6 +605,17 @@
 
         const candidate = charMatch[1].trim();
         return charNames.includes(candidate) ? candidate : null;
+    }
+
+    function getNextNonEmptyLine(lines, startIndex) {
+        for (let index = startIndex; index < lines.length; index++) {
+            const value = lines[index].trim();
+            if (value) {
+                return { index, value };
+            }
+        }
+
+        return null;
     }
 
     function parseActionsFromText(turnContent, stats, turnNum) {
@@ -616,10 +641,10 @@
                 continue;
             }
 
-            const inlineStatusChange = parseInlineStatusChangeLine(line);
+            const inlineStatusChange = parseInlineStatusChangeLine(line, currentChar, currentChar);
             if (inlineStatusChange) {
                 inlineStatusChange.entries.forEach(entry => {
-                    recordReceivedStatusChange(stats, inlineStatusChange.target, entry.name, entry.value, turnNum, inlineStatusChange.target);
+                    recordReceivedStatusChange(stats, inlineStatusChange.target, entry.name, entry.value, turnNum, inlineStatusChange.source);
                 });
                 continue;
             }
@@ -648,14 +673,15 @@
             if (line.includes('ステータスが上昇') || line.includes('ステータスが低下') || line.includes('状態異常が付与')) {
                 const statusTargetMatch = line.match(/^(.+?)\s*(?:の|に)\s.*?(ステータスが上昇|ステータスが低下|状態異常が付与された)/);
                 const target = statusTargetMatch ? statusTargetMatch[1].trim() : currentChar;
-                const summaryLine = lines[index + 1] ? lines[index + 1].trim() : '';
+                const nextLineInfo = getNextNonEmptyLine(lines, index + 1);
+                const summaryLine = nextLineInfo ? nextLineInfo.value : '';
                 const changeType = line.includes('上昇') ? 1 : line.includes('低下') ? -1 : 0;
                 const parsedStatus = parseStatusSummary(summaryLine, changeType);
                 parsedStatus.forEach(entry => {
                     recordReceivedStatusChange(stats, target, entry.name, entry.value, turnNum, currentChar);
                 });
-                if (summaryLine) {
-                    index += 1;
+                if (nextLineInfo && parsedStatus.length > 0) {
+                    index = nextLineInfo.index;
                 }
             }
         }
