@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ドラゴニカ対戦ログ集計ツール
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      1.7
 // @description  対戦ログの各キャラクター行動を集計します
 // @author       ゴニョマル
 // @match        https://metropolis-c.sakura.ne.jp/teikigame/dragon1st/battlelogs/*.html
@@ -47,6 +47,7 @@
                 const textTurns = parseTextForActions(document.body.innerText);
                 aggregateActionsToStats(textTurns, stats);
                 parseFinalTurnStatusConditions(stats);
+                annotateStatusSummaryCurrentValues();
             }
 
             displayStats(stats);
@@ -575,6 +576,122 @@
         return map;
     }
 
+    function annotateStatusSummaryCurrentValues() {
+        const currentStatusTotals = {};
+        const paragraphs = document.querySelectorAll('div.action-block p');
+
+        paragraphs.forEach(paragraph => {
+            const lineText = paragraph.textContent.trim();
+            if (!lineText) {
+                return;
+            }
+
+            const source = getActionBlockSourceName(paragraph);
+            const inlineStatusChange = parseInlineStatusChangeLine(lineText, source, source);
+            if (inlineStatusChange) {
+                applyRunningTrackedStatus(currentStatusTotals, inlineStatusChange.target, inlineStatusChange.entries);
+                return;
+            }
+
+            if (!paragraph.classList.contains('status-summary')) {
+                return;
+            }
+
+            const headerNode = findStatusSummaryHeader(paragraph);
+            if (!headerNode) {
+                return;
+            }
+
+            const headerText = headerNode.textContent.trim();
+            if (!isStatusChangeHeaderLine(headerText)) {
+                return;
+            }
+
+            const target = extractStatusTargetFromHeader(headerText, source);
+            if (!target) {
+                return;
+            }
+
+            const changeType = headerText.includes('上昇') ? 1 : headerText.includes('低下') ? -1 : 0;
+            const parsedStatus = parseStatusSummary(lineText, changeType)
+                .filter(entry => trackedStatusFields.includes(entry.name));
+            if (parsedStatus.length === 0) {
+                return;
+            }
+
+            applyRunningTrackedStatus(currentStatusTotals, target, parsedStatus);
+            const currentValueText = formatCurrentStatusValueText(currentStatusTotals[target], parsedStatus);
+            if (!currentValueText) {
+                return;
+            }
+
+            const originalText = paragraph.dataset.originalStatusSummary || lineText;
+            paragraph.dataset.originalStatusSummary = originalText;
+            paragraph.textContent = `${originalText} （現在値：${currentValueText}）`;
+        });
+    }
+
+    function getActionBlockSourceName(node) {
+        const block = node.closest('div.action-block');
+        if (!block) {
+            return null;
+        }
+
+        const firstParagraph = Array.from(block.children).find(child => child.tagName === 'P');
+        return firstParagraph ? determineBlockSource(firstParagraph) : null;
+    }
+
+    function findStatusSummaryHeader(summaryNode) {
+        let previous = summaryNode.previousElementSibling;
+
+        while (previous) {
+            if (previous.tagName === 'P') {
+                const text = previous.textContent.trim();
+                if (text) {
+                    return previous;
+                }
+            }
+            previous = previous.previousElementSibling;
+        }
+
+        return null;
+    }
+
+    function isStatusChangeHeaderLine(lineText) {
+        return lineText.includes('ステータスが上昇') || lineText.includes('ステータスが低下') || lineText.includes('ステータスが変化');
+    }
+
+    function extractStatusTargetFromHeader(lineText, fallbackTarget) {
+        const match = lineText.match(/^(.+?)\s*(?:の|に)\s.*?(ステータスが上昇|ステータスが低下|ステータスが変化)/);
+        return match ? match[1].trim() : fallbackTarget || null;
+    }
+
+    function applyRunningTrackedStatus(currentStatusTotals, target, entries) {
+        if (!target) {
+            return;
+        }
+
+        if (!currentStatusTotals[target]) {
+            currentStatusTotals[target] = {};
+        }
+
+        entries.forEach(entry => {
+            if (!trackedStatusFields.includes(entry.name)) {
+                return;
+            }
+            currentStatusTotals[target][entry.name] = (currentStatusTotals[target][entry.name] || 0) + entry.value;
+        });
+    }
+
+    function formatCurrentStatusValueText(currentTotals, entries) {
+        if (!currentTotals) {
+            return '';
+        }
+
+        const fields = Array.from(new Set(entries.map(entry => entry.name)));
+        return fields.map(field => `${field}${formatSigned(currentTotals[field] || 0)}`).join(' ');
+    }
+
     function extractActorFromLine(line, charNames) {
         if (!line) {
             return null;
@@ -583,6 +700,7 @@
         if (
             line.includes('ステータスが上昇') ||
             line.includes('ステータスが低下') ||
+            line.includes('ステータスが変化') ||
             line.includes('状態異常が付与') ||
             line.includes('ダメージを与えた') ||
             line.includes('回復した') ||
@@ -670,8 +788,8 @@
             }
 
             // ステータス変化
-            if (line.includes('ステータスが上昇') || line.includes('ステータスが低下') || line.includes('状態異常が付与')) {
-                const statusTargetMatch = line.match(/^(.+?)\s*(?:の|に)\s.*?(ステータスが上昇|ステータスが低下|状態異常が付与された)/);
+            if (line.includes('ステータスが上昇') || line.includes('ステータスが低下') || line.includes('ステータスが変化') || line.includes('状態異常が付与')) {
+                const statusTargetMatch = line.match(/^(.+?)\s*(?:の|に)\s.*?(ステータスが上昇|ステータスが低下|ステータスが変化|状態異常が付与された)/);
                 const target = statusTargetMatch ? statusTargetMatch[1].trim() : currentChar;
                 const nextLineInfo = getNextNonEmptyLine(lines, index + 1);
                 const summaryLine = nextLineInfo ? nextLineInfo.value : '';
