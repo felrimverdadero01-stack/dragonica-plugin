@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ドラゴニカ対戦ログ集計ツール
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.8
 // @description  対戦ログの各キャラクター行動を集計します
 // @author       ゴニョマル
 // @match        https://metropolis-c.sakura.ne.jp/teikigame/dragon1st/battlelogs/*.html
@@ -198,31 +198,21 @@
 
     function parseDOMTurns() {
         const turns = [];
-        let currentTurn = 1;
-        const nodes = Array.from(document.body.querySelectorAll('div.battle-turn, div.action-block'));
+        const battleTurns = Array.from(document.querySelectorAll('div.battle-turn'));
 
-        nodes.forEach(node => {
-            if (node.classList.contains('battle-turn')) {
-                const heading = node.querySelector('h3');
-                const text = heading ? heading.textContent.trim() : '';
-                const match = text.match(/ターン\s*(\d+)/);
-                if (match) {
-                    currentTurn = parseInt(match[1], 10);
-                }
-                if (!turns.some(turn => turn.turnNum === currentTurn)) {
-                    turns.push({turnNum: currentTurn, actionBlocks: []});
-                }
-                return;
-            }
+        battleTurns.forEach((turnNode, index) => {
+            const heading = turnNode.querySelector('h3');
+            const text = heading ? heading.textContent.trim() : '';
+            const match = text.match(/ターン\s*(\d+)/);
+            const turnNum = match ? parseInt(match[1], 10) : index + 1;
 
-            if (node.classList.contains('action-block')) {
-                let turn = turns.find(turn => turn.turnNum === currentTurn);
-                if (!turn) {
-                    turn = {turnNum: currentTurn, actionBlocks: []};
-                    turns.push(turn);
-                }
-                turn.actionBlocks.push(node);
-            }
+            const allBlocks = Array.from(turnNode.querySelectorAll('div.action-block'));
+            const topLevelBlocks = allBlocks.filter(block => !block.parentElement || !block.parentElement.closest('div.action-block'));
+
+            turns.push({
+                turnNum,
+                actionBlocks: topLevelBlocks
+            });
         });
 
         return turns;
@@ -253,52 +243,73 @@
     }
 
     function aggregateActionsToStats(turnData, stats) {
+        const domTurns = parseDOMTurns();
+        if (domTurns.length > 0 && domTurns.some(turn => turn.actionBlocks.length > 0)) {
+            aggregateDOMTurnActions(domTurns, stats);
+            return;
+        }
+
         turnData.forEach(turn => {
             parseActionsFromText(turn.content, stats, turn.turnNum);
         });
     }
 
     function parseActionBlock(block, stats, turnNum) {
-        const lines = Array.from(block.querySelectorAll('p'));
-        if (lines.length === 0) {
+        const directParagraphs = Array.from(block.children).filter(node => node.tagName === 'P');
+        if (directParagraphs.length === 0) {
             return;
         }
 
-        const source = determineBlockSource(lines[0]);
+        const source = determineBlockSource(directParagraphs[0]);
         const sourceKey = findStatsKey(stats, source, block);
         if (!sourceKey) {
             return;
         }
 
         const actorName = stats[sourceKey].name;
+        const children = Array.from(block.children);
 
-        for (let i = 0; i < lines.length; i++) {
-            const lineText = lines[i].textContent.trim();
+        for (let index = 0; index < children.length; index++) {
+            const child = children[index];
+            if (!child) {
+                continue;
+            }
+
+            if (child.classList && child.classList.contains('action-block')) {
+                parseActionBlock(child, stats, turnNum);
+                continue;
+            }
+
+            if (child.tagName !== 'P') {
+                continue;
+            }
+
+            const lineText = child.textContent.trim();
             if (!lineText) continue;
 
             const spRecovery = parseSPRecoveryLine(lineText);
             if (spRecovery) {
-                aggregateSPHealing(stats, actorName, spRecovery.target, spRecovery.recovery, turnNum);
+                aggregateSPHealing(stats, spRecovery.source || actorName, spRecovery.target, spRecovery.recovery, turnNum);
                 continue;
             }
 
-            const damageMatch = lineText.match(/の「(.+?)」が\s*(.+?)\s*に\s*([0-9,]+)\s*ダメージを与えた/);
-            if (damageMatch) {
-                const target = damageMatch[2].trim();
-                const damage = parseInt(damageMatch[3].replace(/,/g, ''), 10);
-                aggregateDamage(stats, actorName, target, damage, turnNum);
+            const inlineStatusChange = parseInlineStatusChangeLine(lineText, actorName, actorName);
+            if (inlineStatusChange) {
+                inlineStatusChange.entries.forEach(entry => {
+                    recordReceivedStatusChange(stats, inlineStatusChange.target, entry.name, entry.value, turnNum, inlineStatusChange.source);
+                });
                 continue;
             }
 
-            if (lineText.includes('SP') && lineText.includes('回復した')) {
+            const damageInfo = parseDamageLine(lineText);
+            if (damageInfo) {
+                aggregateDamage(stats, actorName, damageInfo.target, damageInfo.damage, turnNum);
                 continue;
             }
 
-            const healMatch = lineText.match(/の「(.+?)」が\s*(.+?)\s*を\s*([0-9,]+)\s*回復した/);
-            if (healMatch) {
-                const target = healMatch[2].trim();
-                const recovery = parseInt(healMatch[3].replace(/,/g, ''), 10);
-                aggregateHPHealing(stats, actorName, target, recovery, turnNum);
+            const hpRecovery = parseHPRecoveryLine(lineText);
+            if (hpRecovery) {
+                aggregateHPHealing(stats, actorName, hpRecovery.target, hpRecovery.recovery, turnNum);
                 continue;
             }
 
@@ -313,16 +324,41 @@
             const statusMatch = lineText.match(/^(.+?)\s*(?:の|に)\s.*?(ステータスが上昇|ステータスが低下|ステータスが変化|状態異常が付与された).*$/);
             if (statusMatch) {
                 const target = statusMatch[1].trim();
-                const summaryLine = lines[i + 1] ? lines[i + 1].textContent.trim() : '';
+                const summaryInfo = getNextStatusSummaryParagraph(children, index + 1);
+                const summaryLine = summaryInfo ? summaryInfo.text : '';
                 const changeType = lineText.includes('上昇') ? 1 : lineText.includes('低下') ? -1 : 0;
                 const parsedStatus = parseStatusSummary(summaryLine, changeType);
                 parsedStatus.forEach(entry => {
                     recordReceivedStatusChange(stats, target, entry.name, entry.value, turnNum, actorName);
                 });
-                i += 1;
+                if (summaryInfo && parsedStatus.length > 0) {
+                    index = summaryInfo.index;
+                }
                 continue;
             }
         }
+    }
+
+    function getNextStatusSummaryParagraph(children, startIndex) {
+        for (let index = startIndex; index < children.length; index++) {
+            const child = children[index];
+            if (!child || child.tagName !== 'P') {
+                continue;
+            }
+
+            const text = child.textContent.trim();
+            if (!text) {
+                continue;
+            }
+
+            if (!child.classList.contains('status-summary')) {
+                continue;
+            }
+
+            return { index, text };
+        }
+
+        return null;
     }
 
     function determineBlockSource(firstLine) {
@@ -711,12 +747,12 @@
         }
 
         for (const name of charNames) {
-            if (line.startsWith(`${name} の`) || line.startsWith(`${name}:`)) {
+            if (line.startsWith(`${name} の`)) {
                 return name;
             }
         }
 
-        const charMatch = line.match(/^(.+?)\s*(?:の|:)\s+/);
+        const charMatch = line.match(/^(.+?)\s*の\s+/);
         if (!charMatch) {
             return null;
         }
