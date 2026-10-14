@@ -1,11 +1,10 @@
 // ==UserScript==
 // @name         さぼてん対戦ログ集計ツール
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  対戦ログの各キャラクター行動を集計します
 // @author       ゴニョマル
-// @match        https://metropolis-c.sakura.ne.jp/teikigame/dragon1st/battlelogs/*.html
-// @match        https://metropolis-c.sakura.ne.jp/teiki/mctest/battlelogs/*.html
+// @match        https://metropolis-c.sakura.ne.jp/*/*/battlelogs/*.html
 // @updateURL    https://github.com/felrimverdadero01-stack/dragonica-plugin/raw/main/battlelog_analyzer.user.js
 // @downloadURL  https://github.com/felrimverdadero01-stack/dragonica-plugin/raw/main/battlelog_analyzer.user.js
 // @grant        none
@@ -57,7 +56,7 @@
                 // 最終ターン冒頭テーブルの状態異常列を優先的に取得して上書きする
                 parseFinalTurnStatusConditions(stats);
                 // ログ本文のステータス要約行にも、その時点の累積変化量を追記する
-                annotateStatusSummaryCurrentValues();
+                annotateStatusSummaryCurrentValues(stats);
                 // 右側の詳細表示で使う HP 推移と状態推移を各ターンのステータス表から収集する
                 collectTurnSnapshots(stats);
             }
@@ -263,7 +262,13 @@
     function aggregateDOMTurnActions(turns, stats) {
         turns.forEach(turn => {
             turn.actionBlocks.forEach(block => {
-                parseActionBlock(block, stats, turn.turnNum);
+                const blockLines = Array.from(block.querySelectorAll('p'))
+                    .map(paragraph => paragraph.textContent.trim())
+                    .filter(Boolean)
+                    .join('\n');
+                if (blockLines) {
+                    parseActionsFromText(blockLines, stats, turn.turnNum);
+                }
             });
         });
     }
@@ -273,6 +278,12 @@
         const domTurns = parseDOMTurns();
         if (domTurns.length > 0 && domTurns.some(turn => turn.actionBlocks.length > 0)) {
             aggregateDOMTurnActions(domTurns, stats);
+            turnData.forEach(turn => {
+                if (turn.turnNum <= 1) {
+                    return;
+                }
+                parseActionsFromText(turn.content, stats, turn.turnNum, { statusOnly: true });
+            });
             return;
         }
 
@@ -520,12 +531,16 @@
     // インライン形式のステータス変化行を解析する
     // 対象が省略されている場合は defaultTarget（currentChar）を使用する
     function parseInlineStatusChangeLine(lineText, defaultTarget, source) {
-        if (!lineText || (!lineText.includes('増加した') && !lineText.includes('低下した'))) {
+        if (!lineText || (!lineText.includes('増加') && !lineText.includes('低下'))) {
+            return null;
+        }
+
+        if (lineText.includes('%')) {
             return null;
         }
 
         const fieldPattern = trackedStatusFields.join('|');
-        const match = lineText.match(new RegExp(`^(?:(.+?)\\s+(?:は|の).+?\\s+)?((?:${fieldPattern})(?:\\s*と\\s*(?:${fieldPattern}))*)\\s+が\\s*([0-9,]+)\\s*(増加|低下)した`));
+        const match = lineText.match(new RegExp(`^(?:(.+?)\\s+(?:は|の)\\s+)?((?:${fieldPattern})(?:\\s*と\\s*(?:${fieldPattern}))*)\\s+が\\s*([+-]?[0-9,]+)\\s*(増加|低下)(?:した)?[！!。．]?$`));
         if (!match) {
             return null;
         }
@@ -674,58 +689,127 @@
 
     // 表示中の status-summary 行を DOM 順に走査し、同ターゲットに対する累積値を追記する
     // テキスト主経路がターン前の受動発動を拾わないため、表示更新は DOM ベースで独立して計算する
-    function annotateStatusSummaryCurrentValues() {
+    function annotateStatusSummaryCurrentValues(stats) {
         const currentStatusTotals = {};
-        const paragraphs = document.querySelectorAll('div.action-block p');
+        const paragraphs = Array.from(document.querySelectorAll('div.action-block p, p.status-summary'));
+        paragraphs.forEach(paragraph => annotateStatusSummaryParagraph(paragraph, currentStatusTotals, stats));
+    }
 
-        paragraphs.forEach(paragraph => {
-            const lineText = paragraph.textContent.trim();
-            if (!lineText) {
-                return;
+    function annotateStatusSummaryInActionBlock(block, currentStatusTotals, stats) {
+        const children = Array.from(block.children);
+
+        for (let index = 0; index < children.length; index++) {
+            const child = children[index];
+            if (!child) {
+                continue;
             }
 
-            const source = getActionBlockSourceName(paragraph);
-            const inlineStatusChange = parseInlineStatusChangeLine(lineText, source, source);
-            if (inlineStatusChange) {
-                applyRunningTrackedStatus(currentStatusTotals, inlineStatusChange.target, inlineStatusChange.entries);
-                return;
+            if (child.classList && child.classList.contains('action-block')) {
+                annotateStatusSummaryInActionBlock(child, currentStatusTotals, stats);
+                continue;
             }
 
-            if (!paragraph.classList.contains('status-summary')) {
-                return;
+            if (child.tagName !== 'P') {
+                continue;
             }
 
-            const headerNode = findStatusSummaryHeader(paragraph);
-            if (!headerNode) {
-                return;
-            }
+            annotateStatusSummaryParagraph(child, currentStatusTotals, stats);
+        }
+    }
 
-            const headerText = headerNode.textContent.trim();
-            if (!isStatusChangeHeaderLine(headerText)) {
-                return;
-            }
+    function annotateStatusSummaryParagraph(node, currentStatusTotals, stats) {
+        if (!node || node.tagName !== 'P') {
+            return;
+        }
 
-            const target = extractStatusTargetFromHeader(headerText, source);
-            if (!target) {
-                return;
-            }
+        const lineText = node.textContent.trim();
+        if (!lineText) {
+            return;
+        }
 
-            const changeType = headerText.includes('上昇') ? 1 : headerText.includes('低下') ? -1 : 0;
-            const parsedStatus = parseStatusSummary(lineText, changeType)
-                .filter(entry => trackedStatusFields.includes(entry.name));
-            if (parsedStatus.length === 0) {
-                return;
-            }
-
-            applyRunningTrackedStatus(currentStatusTotals, target, parsedStatus);
-            const currentValueText = formatCurrentStatusValueText(currentStatusTotals[target], parsedStatus);
+        const block = node.closest('div.action-block');
+        const source = block ? determineBlockSource(Array.from(block.children).find(child => child.tagName === 'P')) || getActionBlockSourceName(node) : null;
+        const inlineStatusChange = parseInlineStatusChangeLine(lineText, source, source);
+        if (inlineStatusChange) {
+            applyRunningTrackedStatus(currentStatusTotals, inlineStatusChange.target, inlineStatusChange.entries);
+            recordTurnCurrentStatusSnapshot(stats, node, inlineStatusChange.target, currentStatusTotals, inlineStatusChange.entries);
+            const currentValueText = formatCurrentStatusValueText(currentStatusTotals[inlineStatusChange.target], inlineStatusChange.entries);
             if (!currentValueText) {
                 return;
             }
 
-            const originalText = paragraph.dataset.originalStatusSummary || lineText;
-            paragraph.dataset.originalStatusSummary = originalText;
-            paragraph.textContent = `${originalText} （現在値：${currentValueText}）`;
+            const originalText = node.dataset.originalStatusSummary || lineText;
+            node.dataset.originalStatusSummary = originalText;
+            node.textContent = `${originalText} （現在値：${currentValueText}）`;
+            return;
+        }
+
+        const headerNode = findStatusSummaryHeader(node);
+        if (!headerNode) {
+            return;
+        }
+
+        const headerText = headerNode.textContent.trim();
+        if (!isStatusChangeHeaderLine(headerText)) {
+            return;
+        }
+
+        const target = extractStatusTargetFromHeader(headerText, source);
+        if (!target) {
+            return;
+        }
+
+        const changeType = headerText.includes('上昇') ? 1 : headerText.includes('低下') ? -1 : 0;
+        const parsedStatus = parseStatusSummary(lineText, changeType)
+            .filter(entry => trackedStatusFields.includes(entry.name));
+        if (parsedStatus.length === 0) {
+            return;
+        }
+
+        applyRunningTrackedStatus(currentStatusTotals, target, parsedStatus);
+        recordTurnCurrentStatusSnapshot(stats, node, target, currentStatusTotals, parsedStatus);
+        const currentValueText = formatCurrentStatusValueText(currentStatusTotals[target], parsedStatus);
+        if (!currentValueText) {
+            return;
+        }
+
+        const originalText = node.dataset.originalStatusSummary || lineText;
+        node.dataset.originalStatusSummary = originalText;
+        node.textContent = `${originalText} （現在値：${currentValueText}）`;
+    }
+
+    // 注釈で確定した「その時点の現在値」をターン別に保持し、統計表示側と同じ値源にそろえる
+    function recordTurnCurrentStatusSnapshot(stats, node, targetName, currentStatusTotals, entries) {
+        if (!stats || !node || !targetName || !currentStatusTotals[targetName]) {
+            return;
+        }
+
+        const turnNode = node.closest('div.battle-turn');
+        const heading = turnNode ? turnNode.querySelector('h3') : null;
+        const turnMatch = heading ? heading.textContent.trim().match(/ターン\s*(\d+)/) : null;
+        const turnNum = turnMatch ? Number(turnMatch[1]) : null;
+        if (!turnNum) {
+            return;
+        }
+
+        const candidates = Object.keys(stats).filter(key => stats[key].name === targetName);
+        if (candidates.length === 0) {
+            return;
+        }
+
+        const targetKey = candidates[0];
+        if (!stats[targetKey].turns[turnNum]) {
+            stats[targetKey].turns[turnNum] = {};
+        }
+        if (!stats[targetKey].turns[turnNum].statusCurrent) {
+            stats[targetKey].turns[turnNum].statusCurrent = {};
+        }
+
+        entries.forEach(entry => {
+            if (!trackedStatusFields.includes(entry.name)) {
+                return;
+            }
+            stats[targetKey].turns[turnNum].statusCurrent[entry.name] = currentStatusTotals[targetName][entry.name] || 0;
         });
     }
 
@@ -820,15 +904,59 @@
 
     function mergeConditionMaps(turnData) {
         const merged = {};
-        ['statusConditionsSelf', 'statusConditionsOther'].forEach(key => {
+        ['statusConditions', 'statusConditionsSelf', 'statusConditionsOther'].forEach(key => {
             const map = turnData[key];
             if (map) {
                 Object.entries(map).forEach(([condition, value]) => {
-                    merged[condition] = (merged[condition] || 0) + value;
+                    const numericValue = Number(value) || 0;
+                    if (numericValue !== 0) {
+                        merged[condition] = (merged[condition] || 0) + numericValue;
+                    }
                 });
             }
         });
         return merged;
+    }
+
+    function buildRunningStatusFieldMatrix(stat, turnNumbers) {
+        const runningTotals = {};
+        return trackedStatusFields.map(field => ({
+            field,
+            row: turnNumbers.map(turn => {
+                const turnData = stat.turns[turn] || {};
+                const currentSnapshot = turnData.statusCurrent || null;
+                if (currentSnapshot && currentSnapshot[field] !== undefined) {
+                    runningTotals[field] = currentSnapshot[field];
+                } else {
+                    const selfValue = (turnData.statusChangesSelf && turnData.statusChangesSelf[field]) || 0;
+                    const otherValue = (turnData.statusChangesOther && turnData.statusChangesOther[field]) || 0;
+                    runningTotals[field] = (runningTotals[field] || 0) + selfValue + otherValue;
+                }
+                return runningTotals[field];
+            })
+        }));
+    }
+
+    function buildConditionTrendMatrix(stat, turnNumbers) {
+        const conditionSet = new Set();
+        turnNumbers.forEach(turn => {
+            const turnData = stat.turns[turn] || {};
+            const currentTurnMap = turnData.statusConditions && Object.keys(turnData.statusConditions).length > 0
+                ? turnData.statusConditions
+                : mergeConditionMaps(turnData);
+            Object.keys(currentTurnMap).forEach(condition => conditionSet.add(condition));
+        });
+
+        return Array.from(conditionSet).sort().map(condition => ({
+            condition,
+            values: turnNumbers.map(turn => {
+                const turnData = stat.turns[turn] || {};
+                const currentTurnMap = turnData.statusConditions && Object.keys(turnData.statusConditions).length > 0
+                    ? turnData.statusConditions
+                    : mergeConditionMaps(turnData);
+                return currentTurnMap[condition] || 0;
+            })
+        }));
     }
 
     function formatStatusMap(map) {
@@ -921,10 +1049,11 @@
     // テキスト形式のターン内容を 1 行ずつ走査して全集計を行うメインパーサー
     // currentChar に「現在の行動発動者」を保持しながら各結果行を解析する
     // charNames は長い名前を先に照合するよう降順ソートして部分一致誤検知を防ぐ
-    function parseActionsFromText(turnContent, stats, turnNum) {
+    function parseActionsFromText(turnContent, stats, turnNum, options = {}) {
         const lines = turnContent.split('\n');
         let currentChar = null;
         const charNames = Object.values(stats).map(s => s.name).sort((a, b) => b.length - a.length);
+        const statusOnly = options.statusOnly === true;
 
         for (let index = 0; index < lines.length; index++) {
             const line = lines[index].trim();
@@ -940,6 +1069,32 @@
             if (!currentChar) continue;
 
             // --- 各行の種別を優先順に判定して集計 ---
+
+            if (statusOnly) {
+                const inlineStatusChange = parseInlineStatusChangeLine(line, currentChar, currentChar);
+                if (inlineStatusChange) {
+                    inlineStatusChange.entries.forEach(entry => {
+                        recordReceivedStatusChange(stats, inlineStatusChange.target, entry.name, entry.value, turnNum, inlineStatusChange.source);
+                    });
+                    continue;
+                }
+
+                if (line.includes('ステータスが上昇') || line.includes('ステータスが低下') || line.includes('ステータスが変化') || line.includes('状態異常が付与')) {
+                    const statusTargetMatch = line.match(/^(.+?)\s*(?:の|に)\s.*?(ステータスが上昇|ステータスが低下|ステータスが変化|状態異常が付与された)/);
+                    const target = statusTargetMatch ? statusTargetMatch[1].trim() : currentChar;
+                    const nextLineInfo = getNextNonEmptyLine(lines, index + 1);
+                    const summaryLine = nextLineInfo ? nextLineInfo.value : '';
+                    const changeType = line.includes('上昇') ? 1 : line.includes('低下') ? -1 : 0;
+                    const parsedStatus = parseStatusSummary(summaryLine, changeType);
+                    parsedStatus.forEach(entry => {
+                        recordReceivedStatusChange(stats, target, entry.name, entry.value, turnNum, currentChar);
+                    });
+                    if (nextLineInfo && parsedStatus.length > 0) {
+                        index = nextLineInfo.index;
+                    }
+                }
+                continue;
+            }
 
             // SP 回復（HP 回復より先に判定。「SPを回復した」が HP 回復パターンにも一致してしまうため）
             const spRecovery = parseSPRecoveryLine(line);
@@ -1006,6 +1161,19 @@
                 }
             }
         }
+    }
+
+    function turnHasStatusData(stats, turnNum) {
+        return Object.values(stats).some(stat => {
+            const turnData = stat.turns[turnNum] || {};
+            return Boolean(
+                (turnData.statusChangesSelf && Object.keys(turnData.statusChangesSelf).length > 0) ||
+                (turnData.statusChangesOther && Object.keys(turnData.statusChangesOther).length > 0) ||
+                (turnData.statusConditions && Object.keys(turnData.statusConditions).length > 0) ||
+                (turnData.statusConditionsSelf && Object.keys(turnData.statusConditionsSelf).length > 0) ||
+                (turnData.statusConditionsOther && Object.keys(turnData.statusConditionsOther).length > 0)
+            );
+        });
     }
 
     function aggregateStats(turns) {
@@ -1839,15 +2007,7 @@
                 return map;
             }, [])
             .sort((a, b) => b[1] - a[1]);
-        const statusMatrix = trackedStatusFields.map(field => {
-            const row = turnNumbers.map(turn => {
-                const turnData = stat.turns[turn] || {};
-                const selfValue = (turnData.statusChangesSelf && turnData.statusChangesSelf[field]) || 0;
-                const otherValue = (turnData.statusChangesOther && turnData.statusChangesOther[field]) || 0;
-                return selfValue + otherValue;
-            });
-            return { field, row };
-        });
+        const statusMatrix = buildRunningStatusFieldMatrix(stat, turnNumbers);
 
         if (tabKey === 'actions') {
             const actionRows = turnNumbers.flatMap(turn => {
@@ -1906,9 +2066,16 @@
         }
 
         if (tabKey === 'statusTrend') {
+            const conditionMatrix = buildConditionTrendMatrix(stat, turnNumbers);
+            if (conditionMatrix.length === 0) {
+                return '<div style="font-size:13px; color:#4a5b70;">変調情報はありません。</div>';
+            }
             return `
-                <div style="font-size:12px; color:#4a5b70; margin-bottom:8px;">変調推移</div>
-                <div>${Object.entries(stat.summary.statusConditionsReceived || {}).map(([condition, value]) => `<div style="margin-bottom:8px;">${condition}: ${value}</div>`).join('') || '<div>変調情報なし</div>'}</div>
+                <div style="font-size:12px; color:#4a5b70; margin-bottom:8px;">変調推移（ターン別）</div>
+                <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                    <thead><tr><th style="padding:7px; background:#edf3ff; border:1px solid #dfe7f2;">変調</th>${turnNumbers.map(turn => `<th style="padding:7px; background:#edf3ff; border:1px solid #dfe7f2;">${turn}</th>`).join('')}</tr></thead>
+                    <tbody>${conditionMatrix.map(item => `<tr><td style="padding:7px; border:1px solid #dfe7f2;">${item.condition}</td>${item.values.map(value => `<td style="padding:7px; border:1px solid #dfe7f2;">${value === 0 ? '-' : value}</td>`).join('')}</tr>`).join('')}</tbody>
+                </table>
             `;
         }
 
@@ -1957,7 +2124,7 @@
             return;
         }
 
-        battleTurns.forEach(turnNode => {
+        battleTurns.forEach((turnNode, index) => {
             const heading = turnNode.querySelector('h3');
             const match = heading ? heading.textContent.trim().match(/ターン\s*(\d+)/) : null;
             const turnNum = match ? Number(match[1]) : null;
@@ -1965,7 +2132,8 @@
                 return;
             }
 
-            const tables = turnNode.querySelectorAll('table.battle-status-table');
+            const snapshotNode = battleTurns[index + 1] || turnNode;
+            const tables = snapshotNode.querySelectorAll('table.battle-status-table');
             tables.forEach(table => {
                 const className = table.className || '';
                 const team = className.includes('ally-table') ? 'ally' : className.includes('enemy-table') ? 'enemy' : null;
