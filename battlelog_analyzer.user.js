@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         さぼてん対戦ログ集計ツール
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      2.0
 // @description  対戦ログの各キャラクター行動を集計します
 // @author       ゴニョマル
 // @match        https://metropolis-c.sakura.ne.jp/teikigame/dragon1st/battlelogs/*.html
