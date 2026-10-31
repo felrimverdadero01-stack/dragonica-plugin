@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         さぼてん対戦ログ集計ツール
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.3
 // @description  対戦ログの各キャラクター行動を集計します
 // @author       ゴニョマル
 // @match        https://metropolis-c.sakura.ne.jp/*/*/battlelogs/*.html
@@ -524,14 +524,15 @@
         return entries;
     }
 
-    // 「〇〇 に NNN ダメージを与えた」形式の行を解析する
+    // 「〇〇 に NNN ダメージを与えた」および「〇〇 に NNN ダメージ！」形式の行を解析する
     // 発動者は呼び出し元の currentChar で管理するため、ここでは対象と数値のみ返す
     function parseDamageLine(lineText) {
-        if (!lineText || !lineText.includes('ダメージを与えた')) {
+        if (!lineText || !lineText.includes('ダメージ')) {
             return null;
         }
 
-        const match = lineText.match(/(.+?)\s*に\s*([0-9,]+)\s*ダメージを与えた/);
+        // 新ログでは「ダメージ！」のように「を与えた」が省略されるため、両形式を同一判定で吸収する
+        const match = lineText.match(/(.+?)\s*に\s*([0-9,]+)\s*ダメージ(?:を与えた)?[！!]?/);
         if (!match) {
             return null;
         }
@@ -1043,10 +1044,17 @@
             line.includes('ステータスが変化') ||
             line.includes('状態異常が付与') ||
             line.includes('ダメージを与えた') ||
+            line.includes('ダメージに変換した') ||
+            line.includes('ダメージ補正') ||
             line.includes('回復した') ||
             line.includes('最大HPが') ||
             line.includes('を受けた')
         ) {
+            return null;
+        }
+
+        // 新ログの「〇〇 に N ダメージ！」形式も結果行として扱い、発動者切り替えを防ぐ
+        if (/\s*に\s*[0-9,]+\s*ダメージ(?:を与えた)?[！!]?/.test(line)) {
             return null;
         }
 
