@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         さぼてん対戦ログ集計ツール
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @description  対戦ログの各キャラクター行動を集計します
 // @author       ゴニョマル
 // @match        https://metropolis-c.sakura.ne.jp/*/*/battlelogs/*.html
@@ -53,10 +53,14 @@
                 // ページ本文テキストをターン単位に分割して各種行動を集計する
                 const textTurns = parseTextForActions(document.body.innerText);
                 aggregateActionsToStats(textTurns, stats);
+                // 「ターン1」見出しより前に並ぶ受動発動ログも 0ターン目として解析する
+                aggregatePreTurnActions(stats);
                 // 最終ターン冒頭テーブルの状態異常列を優先的に取得して上書きする
                 parseFinalTurnStatusConditions(stats);
                 // ログ本文のステータス要約行にも、その時点の累積変化量を追記する
                 annotateStatusSummaryCurrentValues(stats);
+                // 戦闘開始時の初期状態も 0ターン目として収集して、推移表の先頭に含める
+                collectInitialTurnSnapshot(stats);
                 // 右側の詳細表示で使う HP 推移と状態推移を各ターンのステータス表から収集する
                 collectTurnSnapshots(stats);
             }
@@ -270,6 +274,35 @@
                     parseActionsFromText(blockLines, stats, turn.turnNum);
                 }
             });
+        });
+    }
+
+    // 「ターン1」見出しより前に出る action-block（パッシブ発動など）を
+    // 0ターン目として集計に取り込む
+    function aggregatePreTurnActions(stats) {
+        const battleLog = document.querySelector('div.battle-log');
+        if (!battleLog) {
+            return;
+        }
+
+        const firstTurnNode = battleLog.querySelector('div.battle-turn');
+        const preTurnBlocks = [];
+        const children = Array.from(battleLog.children || []);
+
+        for (const child of children) {
+            if (!child) {
+                continue;
+            }
+            if (firstTurnNode && child === firstTurnNode) {
+                break;
+            }
+            if (child.classList && child.classList.contains('action-block')) {
+                preTurnBlocks.push(child);
+            }
+        }
+
+        preTurnBlocks.forEach(block => {
+            parseActionBlock(block, stats, 0);
         });
     }
 
@@ -1376,10 +1409,7 @@
             width: min(980px, calc(100vw - 220px));
             max-width: 980px;
             margin-left: auto;
-            padding: 14px;
             box-sizing: border-box;
-            background: linear-gradient(135deg, rgba(246,247,251,0.98) 0%, rgba(238,242,248,0.98) 100%);
-            border: 3px solid #2d3642;
             border-radius: 12px;
             box-shadow: 0 18px 50px rgba(30, 39, 52, 0.18);
             font-family: "Segoe UI", "Yu Gothic", sans-serif;
@@ -1398,22 +1428,20 @@
             #battlelog-stats *,
             #battlelog-stats *::before,
             #battlelog-stats *::after {
-                color: #1d2733 !important;
+                color: #e8f7ff !important;
                 background-color: transparent !important;
-                border-color: #dfe7f2 !important;
+                border-color: rgba(117, 170, 255, 0.35) !important;
                 box-shadow: none !important;
                 text-shadow: none !important;
                 font-family: "Segoe UI", "Yu Gothic", sans-serif !important;
             }
             #battlelog-overlay-root {
                 pointer-events: none;
+                width: calc(100vw - 36px);
+                max-width: calc(100vw - 36px);
             }
             #battlelog-overlay-root > * {
                 pointer-events: auto;
-            }
-            #battlelog-overlay-root {
-                width: calc(100vw - 36px);
-                max-width: calc(100vw - 36px);
             }
             #battlelog-stats {
                 margin-left: auto;
@@ -1421,14 +1449,26 @@
                 flex-direction: column;
                 height: calc(100vh - 36px);
                 max-height: calc(100vh - 36px);
+                background: linear-gradient(180deg, rgba(7, 14, 24, 0.96) 0%, rgba(11, 18, 29, 0.96) 100%);
+                border: 1px solid rgba(91, 170, 255, 0.7);
+                border-radius: 16px;
+                box-shadow: 0 0 0 1px rgba(144, 213, 255, 0.18), 0 18px 50px rgba(0, 0, 0, 0.5), inset 0 0 28px rgba(59, 104, 255, 0.10);
+                overflow: hidden;
+            }
+            #battlelog-stats::before {
+                content: "";
+                position: absolute;
+                inset: 0;
+                background: linear-gradient(135deg, rgba(103, 194, 255, 0.12), transparent 35%, rgba(255, 118, 164, 0.06) 100%);
+                pointer-events: none;
             }
             #battlelog-rail {
                 width: 120px;
                 min-width: 120px;
                 max-height: calc(100vh - 120px);
-                background: rgba(255,255,255,0.85);
-                border: 1px solid #dfe7f2;
-                border-radius: 12px;
+                background: rgba(8, 14, 22, 0.9);
+                border: 1px solid rgba(123, 176, 255, 0.35);
+                border-radius: 14px;
                 padding: 10px 8px;
                 box-sizing: border-box;
                 overflow-y: auto;
@@ -1440,21 +1480,27 @@
                 align-items: stretch;
                 margin-right: 0;
                 scrollbar-gutter: stable;
+                box-shadow: inset 0 0 18px rgba(58, 123, 255, 0.08);
             }
-            #battlelog-rail {
-                display: flex;
-                flex-direction: column;
-                justify-content: flex-start;
+            #battlelog-rail::-webkit-scrollbar {
+                width: 8px;
+            }
+            #battlelog-rail::-webkit-scrollbar-track {
+                background: rgba(16, 24, 34, 0.9);
+            }
+            #battlelog-rail::-webkit-scrollbar-thumb {
+                background: linear-gradient(180deg, rgba(64, 170, 255, 0.8), rgba(121, 123, 255, 0.7));
+                border-radius: 8px;
             }
             #battlelog-rail .battlelog-rail-group {
                 margin-bottom: 12px;
             }
             #battlelog-rail .battlelog-rail-group-title {
                 font-size: 10px;
-                color: #6a7889;
+                color: #9bb7d8;
                 font-weight: 700;
                 text-align: center;
-                letter-spacing: 0.08em;
+                letter-spacing: 0.12em;
                 margin-bottom: 8px;
             }
             #battlelog-rail .battlelog-rail-item {
@@ -1466,22 +1512,24 @@
                 gap: 6px;
                 padding: 8px 4px 7px;
                 margin-bottom: 8px;
-                border: 1px solid #dfe7f2;
+                border: 1px solid rgba(124, 170, 255, 0.28);
                 border-radius: 12px;
-                background: #fff;
+                background: linear-gradient(180deg, rgba(15, 25, 37, 0.92), rgba(10, 18, 28, 0.92));
                 cursor: pointer;
                 transition: all 0.15s ease;
                 text-align: center;
                 min-height: 76px;
+                box-shadow: inset 0 0 16px rgba(98, 170, 255, 0.05);
             }
             #battlelog-rail .battlelog-rail-item:hover {
-                border-color: #8ea9ff;
-                background: #f5f8ff;
+                border-color: rgba(102, 196, 255, 0.7);
+                background: linear-gradient(180deg, rgba(18, 31, 46, 0.98), rgba(12, 22, 34, 0.98));
+                box-shadow: inset 0 0 18px rgba(102, 196, 255, 0.1);
             }
             #battlelog-rail .battlelog-rail-item.selected {
-                background: #edf4ff !important;
-                border-color: #8ea9ff !important;
-                box-shadow: inset 0 0 0 1px rgba(73, 112, 255, 0.18) !important;
+                background: linear-gradient(180deg, rgba(21, 42, 62, 0.98), rgba(13, 23, 34, 0.98)) !important;
+                border-color: rgba(111, 203, 255, 0.85) !important;
+                box-shadow: inset 0 0 0 1px rgba(118, 205, 255, 0.2), 0 0 18px rgba(88, 184, 255, 0.16) !important;
             }
             #battlelog-rail .battlelog-rail-icon {
                 width: 42px;
@@ -1489,8 +1537,8 @@
                 min-width: 42px;
                 min-height: 42px;
                 border-radius: 12px;
-                background: linear-gradient(135deg, #2e74ff 0%, #5ca5ff 100%);
-                color: #fff !important;
+                background: linear-gradient(135deg, #2c7cff 0%, #5ed4ff 100%);
+                color: #04111d !important;
                 font-weight: 800;
                 font-size: 20px;
                 display: flex;
@@ -1499,12 +1547,17 @@
                 line-height: 1;
                 flex-shrink: 0;
                 letter-spacing: 0;
+                box-shadow: 0 0 18px rgba(46, 166, 255, 0.28);
             }
             #battlelog-rail .battlelog-rail-item[data-team="enemy"] .battlelog-rail-icon {
-                background: linear-gradient(135deg, #ff7d67 0%, #ff4e5b 100%);
+                background: linear-gradient(135deg, #ff5d7a 0%, #ff9d4d 100%);
+                color: #1c0d12 !important;
+                box-shadow: 0 0 18px rgba(255, 93, 122, 0.28);
             }
             #battlelog-rail .battlelog-rail-item[data-summary="true"] .battlelog-rail-icon {
-                background: linear-gradient(135deg, #7f8dff 0%, #622ad1 100%);
+                background: linear-gradient(135deg, #7b8cff 0%, #b76dff 100%);
+                color: #130d1c !important;
+                box-shadow: 0 0 18px rgba(129, 101, 255, 0.25);
             }
             #battlelog-rail .battlelog-rail-name {
                 display: block;
@@ -1512,24 +1565,26 @@
                 font-size: 11px;
                 line-height: 1.3;
                 min-height: 2.6em;
-                color: #1d2733 !important;
+                color: #e8f7ff !important;
                 word-break: break-word;
                 overflow-wrap: anywhere;
+                text-shadow: 0 0 12px rgba(145, 192, 255, 0.18);
             }
             #battlelog-stats .battlelog-detail-panel {
                 flex: 1 1 auto;
                 min-width: 0;
                 width: 100%;
                 max-width: none;
-                background: rgba(255,255,255,0.8);
-                border: 1px solid #dfe7f2;
-                border-radius: 12px;
+                background: rgba(9, 16, 24, 0.82);
+                border: 1px solid rgba(123, 176, 255, 0.3);
+                border-radius: 14px;
                 overflow: hidden;
                 display: flex;
                 flex-direction: column;
                 margin-left: 0;
                 min-height: 0;
                 height: 100%;
+                box-shadow: inset 0 0 18px rgba(106, 164, 255, 0.06);
             }
             #battlelog-stats .battlelog-detail-panel.collapsed {
                 display: none;
@@ -1539,24 +1594,27 @@
                 align-items: center;
                 justify-content: space-between;
                 padding: 12px 14px;
-                border-bottom: 1px solid #dfe7f2;
-                background: rgba(245,248,255,0.9);
+                border-bottom: 1px solid rgba(123, 176, 255, 0.28);
+                background: linear-gradient(180deg, rgba(16, 26, 39, 0.96), rgba(11, 18, 29, 0.96));
             }
             #battlelog-stats .battlelog-detail-title {
                 font-size: 14px;
                 font-weight: 700;
-                color: #1d2733 !important;
+                color: #dff4ff !important;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
             }
             #battlelog-stats .battlelog-close-btn {
                 width: 30px;
                 height: 30px;
-                border: 1px solid #dfe7f2;
+                border: 1px solid rgba(120, 175, 255, 0.35);
                 border-radius: 9px;
-                background: #fff;
-                color: #37465d !important;
+                background: rgba(13, 24, 36, 0.95);
+                color: #dff4ff !important;
                 font-size: 18px;
                 cursor: pointer;
                 line-height: 1;
+                box-shadow: inset 0 0 16px rgba(95, 180, 255, 0.1);
             }
             #battlelog-stats .battlelog-detail-body {
                 flex: 1 1 auto;
@@ -1567,6 +1625,39 @@
                 min-height: 0;
                 max-height: none;
                 height: 100%;
+                background: linear-gradient(180deg, rgba(10, 17, 25, 0.95), rgba(8, 14, 22, 0.98));
+            }
+            #battlelog-stats .battlelog-detail-body::-webkit-scrollbar {
+                width: 8px;
+            }
+            #battlelog-stats .battlelog-detail-body::-webkit-scrollbar-track {
+                background: rgba(16, 24, 34, 0.9);
+            }
+            #battlelog-stats .battlelog-detail-body::-webkit-scrollbar-thumb {
+                background: linear-gradient(180deg, rgba(64, 170, 255, 0.8), rgba(121, 123, 255, 0.7));
+                border-radius: 8px;
+            }
+            #battlelog-stats .battlelog-scroll-table {
+                scrollbar-color: rgba(78, 180, 255, 0.85) rgba(10, 20, 30, 0.92);
+                scrollbar-width: thin;
+            }
+            #battlelog-stats .battlelog-scroll-table::-webkit-scrollbar {
+                width: 10px;
+                height: 10px;
+            }
+            #battlelog-stats .battlelog-scroll-table::-webkit-scrollbar-track {
+                background: linear-gradient(180deg, rgba(10, 18, 28, 0.94), rgba(14, 24, 36, 0.94));
+                border-radius: 10px;
+                box-shadow: inset 0 0 8px rgba(66, 126, 196, 0.2);
+            }
+            #battlelog-stats .battlelog-scroll-table::-webkit-scrollbar-thumb {
+                background: linear-gradient(180deg, rgba(68, 186, 255, 0.95), rgba(108, 126, 255, 0.9));
+                border-radius: 10px;
+                border: 1px solid rgba(174, 228, 255, 0.35);
+                box-shadow: 0 0 10px rgba(71, 172, 255, 0.35);
+            }
+            #battlelog-stats .battlelog-scroll-table::-webkit-scrollbar-thumb:hover {
+                background: linear-gradient(180deg, rgba(86, 202, 255, 0.98), rgba(139, 154, 255, 0.95));
             }
             #battlelog-stats button,
             #battlelog-stats td,
@@ -1580,12 +1671,50 @@
             #battlelog-stats label {
                 color: inherit !important;
             }
+            #battlelog-stats table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12px;
+                background: transparent !important;
+            }
+            #battlelog-stats th,
+            #battlelog-stats td {
+                border: 1px solid rgba(123, 176, 255, 0.3) !important;
+                padding: 7px 6px !important;
+                background: rgba(13, 20, 30, 0.95) !important;
+                color: #edf8ff !important;
+            }
+            #battlelog-stats th {
+                background: linear-gradient(180deg, rgba(24, 41, 59, 0.98), rgba(15, 24, 36, 0.98)) !important;
+                color: #cfeeff !important;
+                font-weight: 700;
+                letter-spacing: 0.05em;
+            }
+            #battlelog-stats tbody tr:nth-child(even) td {
+                background: rgba(16, 26, 39, 0.92) !important;
+            }
+            #battlelog-stats tbody tr:hover td {
+                background: rgba(22, 35, 51, 0.96) !important;
+            }
             #battlelog-stats .battlelog-muted,
             #battlelog-stats [style*="color:#4f5d6d"],
             #battlelog-stats [style*="color:#516177"],
             #battlelog-stats [style*="color:#5b6979"],
             #battlelog-stats [style*="color:#243447"] {
-                color: #4f5d6d !important;
+                color: #9bb4cf !important;
+            }
+            #battlelog-stats [style*="background:#fff"],
+            #battlelog-stats [style*="background:#f5f8ff"],
+            #battlelog-stats [style*="background:#edf4ff"],
+            #battlelog-stats [style*="background:#edf3ff"],
+            #battlelog-stats [style*="background:#eaf1ff"] {
+                background: rgba(11, 22, 32, 0.9) !important;
+            }
+            #battlelog-stats [style*="border:1px solid #dfe7f2"],
+            #battlelog-stats [style*="border:1px solid rgba(223,231,242"],
+            #battlelog-stats [style*="border:1px solid #d6deea"],
+            #battlelog-stats [style*="border:1px solid #dfe7f2; border-radius:10px"] {
+                border-color: rgba(123, 176, 255, 0.28) !important;
             }
         `;
         document.head.appendChild(style);
@@ -2072,10 +2201,12 @@
             }
             return `
                 <div style="font-size:12px; color:#4a5b70; margin-bottom:8px;">変調推移（ターン別）</div>
-                <table style="width:100%; border-collapse:collapse; font-size:12px;">
-                    <thead><tr><th style="padding:7px; background:#edf3ff; border:1px solid #dfe7f2;">変調</th>${turnNumbers.map(turn => `<th style="padding:7px; background:#edf3ff; border:1px solid #dfe7f2;">${turn}</th>`).join('')}</tr></thead>
-                    <tbody>${conditionMatrix.map(item => `<tr><td style="padding:7px; border:1px solid #dfe7f2;">${item.condition}</td>${item.values.map(value => `<td style="padding:7px; border:1px solid #dfe7f2;">${value === 0 ? '-' : value}</td>`).join('')}</tr>`).join('')}</tbody>
-                </table>
+                <div class="battlelog-scroll-table" style="max-width:100%; overflow-x:auto; overflow-y:auto; max-height:60vh; border:1px solid #dfe7f2; border-radius:8px;">
+                    <table style="width:max-content; min-width:100%; border-collapse:collapse; font-size:12px;">
+                        <thead><tr><th style="padding:7px; background:#edf3ff; border:1px solid #dfe7f2;">変調</th>${turnNumbers.map(turn => `<th style="padding:7px; background:#edf3ff; border:1px solid #dfe7f2;">${turn}</th>`).join('')}</tr></thead>
+                        <tbody>${conditionMatrix.map(item => `<tr><td style="padding:7px; border:1px solid #dfe7f2;">${item.condition}</td>${item.values.map(value => `<td style="padding:7px; border:1px solid #dfe7f2;">${value === 0 ? '-' : value}</td>`).join('')}</tr>`).join('')}</tbody>
+                    </table>
+                </div>
             `;
         }
 
@@ -2084,10 +2215,12 @@
                 return '<div style="font-size:13px; color:#4a5b70;">ステータス変化情報はありません。</div>';
             }
             return `
-                <table style="width:100%; border-collapse:collapse; font-size:12px;">
-                    <thead><tr><th style="padding:7px; background:#edf3ff; border:1px solid #dfe7f2;">ステータス</th>${turnNumbers.map(turn => `<th style="padding:7px; background:#edf3ff; border:1px solid #dfe7f2;">${turn}</th>`).join('')}</tr></thead>
-                    <tbody>${statusMatrix.map(item => `<tr><td style="padding:7px; border:1px solid #dfe7f2;">${item.field}</td>${item.row.map(value => `<td style="padding:7px; border:1px solid #dfe7f2;">${value === 0 ? '-' : value}</td>`).join('')}</tr>`).join('')}</tbody>
-                </table>
+                <div class="battlelog-scroll-table" style="max-width:100%; overflow-x:auto; overflow-y:auto; max-height:60vh; border:1px solid #dfe7f2; border-radius:8px;">
+                    <table style="width:max-content; min-width:100%; border-collapse:collapse; font-size:12px;">
+                        <thead><tr><th style="padding:7px; background:#edf3ff; border:1px solid #dfe7f2;">ステータス</th>${turnNumbers.map(turn => `<th style="padding:7px; background:#edf3ff; border:1px solid #dfe7f2;">${turn}</th>`).join('')}</tr></thead>
+                        <tbody>${statusMatrix.map(item => `<tr><td style="padding:7px; border:1px solid #dfe7f2;">${item.field}</td>${item.row.map(value => `<td style="padding:7px; border:1px solid #dfe7f2;">${value === 0 ? '-' : value}</td>`).join('')}</tr>`).join('')}</tbody>
+                    </table>
+                </div>
             `;
         }
 
@@ -2118,6 +2251,58 @@
         return Object.values(turnData.hpHealed || {}).reduce((sum, value) => sum + value, 0);
     }
 
+    function collectInitialTurnSnapshot(stats) {
+        const initialTables = Array.from(document.querySelectorAll('table.battle-status-table'))
+            .filter(table => !table.closest('div.battle-turn'));
+
+        if (initialTables.length === 0) {
+            return;
+        }
+
+        initialTables.forEach(table => {
+            collectTurnTableSnapshot(stats, table, 0);
+        });
+    }
+
+    function collectTurnTableSnapshot(stats, table, turnNum) {
+        const className = table.className || '';
+        const team = className.includes('ally-table') ? 'ally' : className.includes('enemy-table') ? 'enemy' : null;
+        if (!team) {
+            return;
+        }
+
+        const rows = table.querySelectorAll('tbody tr');
+        rows.forEach(row => {
+            const cells = row.querySelectorAll('td');
+            if (cells.length < 3) {
+                return;
+            }
+            const name = cells[1] ? cells[1].textContent.trim() : '';
+            if (!name || name === '名前') {
+                return;
+            }
+            const hpCell = cells[2];
+            const hpText = hpCell ? hpCell.textContent.trim() : '';
+            const hpMatch = hpText.match(/(\d+)\s*\/\s*(\d+)/);
+            const key = findStatsKeyByNameTeam(stats, name, team);
+            if (!key) {
+                return;
+            }
+            if (!stats[key].turns[turnNum]) {
+                stats[key].turns[turnNum] = {};
+            }
+            if (hpMatch) {
+                stats[key].turns[turnNum].hpCurrent = parseInt(hpMatch[1], 10);
+                stats[key].turns[turnNum].maxHP = parseInt(hpMatch[2], 10);
+            }
+            const statusText = cells[cells.length - 1] ? cells[cells.length - 1].textContent.trim() : '';
+            const conditionMap = parseConditionText(statusText);
+            if (Object.keys(conditionMap).length > 0) {
+                stats[key].turns[turnNum].statusConditions = conditionMap;
+            }
+        });
+    }
+
     function collectTurnSnapshots(stats) {
         const battleTurns = document.querySelectorAll('div.battle-turn');
         if (battleTurns.length === 0) {
@@ -2135,38 +2320,7 @@
             const snapshotNode = battleTurns[index + 1] || turnNode;
             const tables = snapshotNode.querySelectorAll('table.battle-status-table');
             tables.forEach(table => {
-                const className = table.className || '';
-                const team = className.includes('ally-table') ? 'ally' : className.includes('enemy-table') ? 'enemy' : null;
-                const rows = table.querySelectorAll('tbody tr');
-                rows.forEach(row => {
-                    const cells = row.querySelectorAll('td');
-                    if (cells.length < 3) {
-                        return;
-                    }
-                    const name = cells[1] ? cells[1].textContent.trim() : '';
-                    if (!name || name === '名前') {
-                        return;
-                    }
-                    const hpCell = cells[2];
-                    const hpText = hpCell ? hpCell.textContent.trim() : '';
-                    const hpMatch = hpText.match(/(\d+)\s*\/\s*(\d+)/);
-                    const key = findStatsKeyByNameTeam(stats, name, team);
-                    if (!key) {
-                        return;
-                    }
-                    if (!stats[key].turns[turnNum]) {
-                        stats[key].turns[turnNum] = {};
-                    }
-                    if (hpMatch) {
-                        stats[key].turns[turnNum].hpCurrent = parseInt(hpMatch[1], 10);
-                        stats[key].turns[turnNum].maxHP = parseInt(hpMatch[2], 10);
-                    }
-                    const statusText = cells[cells.length - 1] ? cells[cells.length - 1].textContent.trim() : '';
-                    const conditionMap = parseConditionText(statusText);
-                    if (Object.keys(conditionMap).length > 0) {
-                        stats[key].turns[turnNum].statusConditions = conditionMap;
-                    }
-                });
+                collectTurnTableSnapshot(stats, table, turnNum);
             });
         });
     }
